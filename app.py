@@ -3,13 +3,15 @@ app.py — Step 9
 
 Two views, one page:
 
-  "Try It Yourself" — upload your code file and its test file separately,
-  hit Run, and get back the corrected code file. No Planner call: with an
-  explicit code file + test file, the step is unambiguous (run the test
-  file, the test file is the frozen spec), so this constructs the
-  PlannedStep directly instead of asking an LLM to guess file roles —
-  fewer tokens spent, and it can't repeat the target_file mix-up we hit
-  earlier when the Planner was inferring that from free text.
+  "Try It Yourself" — upload a code file and either (a) a test file, which
+  runs through the deterministic Tier-1 pytest check, or (b) no test file,
+  which routes through the Tier-2 LLM judge instead (judge.py already
+  exists for exactly this case — no test means no deterministic check is
+  possible). Either way this constructs the PlannedStep directly rather
+  than calling the Planner: with the file roles stated explicitly there's
+  nothing left to infer, which also means no Planner tokens spent and no
+  repeat of the target_file mix-up from when the Planner was guessing that
+  from free text.
 
   "Live Ledger" — the original view: auto-refreshes off ledger.jsonl, meant
   to be left open while you trigger a run from a second terminal
@@ -41,22 +43,46 @@ tab_try, tab_ledger = st.tabs(["🧪 Try It Yourself", "📜 Live Ledger"])
 
 # ============================================================== Try It Yourself
 with tab_try:
-    st.caption(
-        "Upload your code file and its test file. The agent runs the test "
-        "for real, and if it fails, tries to fix your code — never the "
-        "test — and re-runs until it passes or runs out of attempts."
+    mode = st.radio(
+        "How should correctness be checked?",
+        ["I have a test file (deterministic — recommended)", "No test file — let the AI judge it"],
+        horizontal=True,
     )
+    has_test = mode.startswith("I have")
 
-    col1, col2 = st.columns(2)
-    with col1:
-        code_file = st.file_uploader("Your code file", key="code_upload")
-    with col2:
-        test_file = st.file_uploader("Your test file (defines correctness — never modified)", key="test_upload")
+    if has_test:
+        st.caption(
+            "The agent runs your test for real (a subprocess, not an LLM "
+            "opinion). If it fails, Recovery tries to fix your code — "
+            "never the test — and it re-runs until it passes or runs out "
+            "of attempts."
+        )
+        col1, col2 = st.columns(2)
+        with col1:
+            code_file = st.file_uploader("Your code file", key="code_upload")
+        with col2:
+            test_file = st.file_uploader("Your test file (never modified)", key="test_upload")
 
-    ready = bool(code_file and test_file)
-    if code_file and test_file and code_file.name == test_file.name:
-        st.error("Code file and test file can't be the same file.")
-        ready = False
+        ready = bool(code_file and test_file)
+        if code_file and test_file and code_file.name == test_file.name:
+            st.error("Code file and test file can't be the same file.")
+            ready = False
+        judge_task = None
+    else:
+        st.caption(
+            "⚠️ No test file means no deterministic check is possible — this "
+            "goes through the Tier-2 LLM judge instead. That verdict is an "
+            "AI's opinion, not a fact, so it's shown with a confidence score "
+            "and marked 🟡 rather than ✅, exactly like the terminal ledger "
+            "distinguishes it. Prefer the test-file mode whenever you can."
+        )
+        code_file = st.file_uploader("Your code file", key="code_upload_judge")
+        test_file = None
+        judge_task = st.text_input(
+            "What should the AI check? Be specific — this is what it judges against.",
+            placeholder='e.g. "Validates email addresses correctly, including edge cases"',
+        )
+        ready = bool(code_file and judge_task)
 
     run_clicked = st.button("▶ Run Agent", type="primary", disabled=not ready)
 
@@ -71,35 +97,46 @@ with tab_try:
                 os.remove(path)
 
         code_content = code_file.getvalue().decode("utf-8", errors="replace")
-        test_content = test_file.getvalue().decode("utf-8", errors="replace")
         with open(os.path.join(SCRATCH_DIR, code_file.name), "w") as f:
             f.write(code_content)
-        with open(os.path.join(SCRATCH_DIR, test_file.name), "w") as f:
-            f.write(test_content)
+
+        if has_test:
+            test_content = test_file.getvalue().decode("utf-8", errors="replace")
+            with open(os.path.join(SCRATCH_DIR, test_file.name), "w") as f:
+                f.write(test_content)
+            step = PlannedStep(
+                step_id="user_test",
+                action_type="run_tests",
+                target_file=test_file.name,   # the literal pytest argument
+                spec_file=test_file.name,     # frozen — Recovery is blocked from touching this
+                success_condition="pytest exit code == 0",
+            )
+            all_files = [code_file.name, test_file.name]
+        else:
+            step = PlannedStep(
+                step_id="user_judge",
+                action_type="apply_patch",     # no command to run — judge reads the file content
+                target_file=code_file.name,
+                spec_file=None,                # nothing frozen — there's no test to protect
+                success_condition=judge_task,
+                requires_llm_judge=True,
+                judge_justification="No test file was provided by the user.",
+            )
+            all_files = [code_file.name]
 
         reset_ledger()  # this run's ledger view starts clean
 
-        step = PlannedStep(
-            step_id="user_test",
-            action_type="run_tests",
-            target_file=test_file.name,   # the literal pytest argument
-            spec_file=test_file.name,     # frozen — Recovery is blocked from touching this
-            success_condition="pytest exit code == 0",
-        )
-        all_files = [code_file.name, test_file.name]
-
         st.subheader("Execution")
-
-        with st.spinner("Running your test..."):
+        with st.spinner("Running..."):
             state = run_step(step, all_files)
 
         # Every attempt got appended to ledger.jsonl by run_step() itself, via
         # the same append_row() call the terminal flow uses — not something
         # this UI constructs after the fact. Since reset_ledger() ran right
         # before this, every row here belongs to THIS run. Show all of them,
-        # each with its raw pytest stdout/stderr, so "attempts: N" isn't a
-        # number you have to take on faith.
-        attempt_rows = [r for r in read_all_rows() if r["step_id"] == "user_test"]
+        # each with its raw evidence, so "attempts: N" isn't a number you
+        # have to take on faith.
+        attempt_rows = [r for r in read_all_rows() if r["step_id"] == step.step_id]
         st.dataframe(
             pd.DataFrame([
                 {"attempt": r["attempt"], "tier": r["tier"], "verdict": r["verdict"], "timestamp": r["timestamp"]}
@@ -108,20 +145,26 @@ with tab_try:
             use_container_width=True, hide_index=True,
         )
         for r in attempt_rows:
-            with st.expander(f"Raw evidence — attempt {r['attempt']} ({r['verdict']})"):
-                st.code(r["evidence"].get("stdout", "") + r["evidence"].get("stderr", ""), language="text")
+            with st.expander(f"Raw evidence — attempt {r['attempt']} ({r['tier']}, {r['verdict']})"):
+                if r["tier"] == "deterministic":
+                    st.code(r["evidence"].get("stdout", "") + r["evidence"].get("stderr", ""), language="text")
+                else:
+                    st.write(f"Confidence: {r['confidence']:.2f}")
+                    st.write(r["evidence"].get("cited_evidence", "(no evidence cited)"))
 
         if state.status == "verified_pass":
             if state.attempt > 1:
                 st.success(f"Passed after {state.attempt} attempt(s) — the agent fixed your code.")
-            else:
+            elif has_test:
                 st.success("Passed on the first try — your code already satisfied the test.")
+            else:
+                st.success("Judged as passing on the first try.")
         else:
             st.warning(
                 "Didn't reach a verified pass (see status above) — this can "
                 "mean the fix attempts were exhausted, or Recovery tried to "
-                "touch the test file and got blocked, flagging it for "
-                "human review instead."
+                "touch a frozen file and got blocked, flagging it for human "
+                "review instead."
             )
 
         st.subheader("Your corrected file")
