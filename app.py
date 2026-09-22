@@ -89,21 +89,27 @@ with tab_try:
         all_files = [code_file.name, test_file.name]
 
         st.subheader("Execution")
-        results_placeholder = st.empty()
-        results_rows = []
 
         with st.spinner("Running your test..."):
             state = run_step(step, all_files)
 
-        results_rows.append({
-            "step": state.step_id,
-            "status": state.status,
-            "verdict": state.evidence.verdict if state.evidence else "—",
-            "tier": state.evidence.tier if state.evidence else "—",
-            "attempts": state.attempt,
-        })
-        with results_placeholder.container():
-            st.dataframe(pd.DataFrame(results_rows), use_container_width=True, hide_index=True)
+        # Every attempt got appended to ledger.jsonl by run_step() itself, via
+        # the same append_row() call the terminal flow uses — not something
+        # this UI constructs after the fact. Since reset_ledger() ran right
+        # before this, every row here belongs to THIS run. Show all of them,
+        # each with its raw pytest stdout/stderr, so "attempts: N" isn't a
+        # number you have to take on faith.
+        attempt_rows = [r for r in read_all_rows() if r["step_id"] == "user_test"]
+        st.dataframe(
+            pd.DataFrame([
+                {"attempt": r["attempt"], "tier": r["tier"], "verdict": r["verdict"], "timestamp": r["timestamp"]}
+                for r in attempt_rows
+            ]),
+            use_container_width=True, hide_index=True,
+        )
+        for r in attempt_rows:
+            with st.expander(f"Raw evidence — attempt {r['attempt']} ({r['verdict']})"):
+                st.code(r["evidence"].get("stdout", "") + r["evidence"].get("stderr", ""), language="text")
 
         if state.status == "verified_pass":
             if state.attempt > 1:
