@@ -1,0 +1,7 @@
+google-genai
+python-dotenv
+pydantic
+pytest
+ruff
+streamlit
+pandas

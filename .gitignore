@@ -1,0 +1,18 @@
+l # secrets — never commit
+.env
+
+# runtime data
+ledger.jsonl
+
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# streamlit
+.streamlit/
+
+# editor/OS cruft
+.DS_Store
+.vscode/
