@@ -53,7 +53,7 @@ def execute(step: PlannedStep) -> dict:
         result = _run(["ruff", "check", step.target_file])
 
     elif step.action_type == "run_tests":
-        result = _run(["pytest", step.target_file, "-v"])
+        result = _run(["pytest", step.target_file, "-q", "--tb=short", "--no-header"])
 
     elif step.action_type == "run_script":
         result = _run(["python", step.target_file])
